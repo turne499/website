@@ -32,12 +32,19 @@ const ARMED = process.env.LIVE_PERMISSIONS === "1";
 const d = ARMED ? describe : describe.skip;
 
 function loadEnv() {
-  for (const line of readFileSync(".env", "utf8").split("\n")) {
+  let contents: string;
+  try {
+    contents = readFileSync(".env", "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+
+  for (const line of contents.split("\n")) {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
   }
 }
-loadEnv();
 
 // The session is built from what the DATABASE says, not from a literal.
 let mockSession: { user: { email: string; role: string; memberId: string } } | null = null;
@@ -77,6 +84,7 @@ d("live permissions (real database rows)", () => {
   const resolved = new Map<Role, { memberId: string; role: string }>();
 
   beforeAll(async () => {
+    loadEnv();
     sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
     const { count } = await sb.from("members").select("*", { count: "exact", head: true });
