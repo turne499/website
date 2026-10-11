@@ -5,6 +5,7 @@ import { FAQAccordion } from "@/components/FAQAccordion";
 import { PhotoCarousel } from "@/components/PhotoCarousel";
 import { PageHero } from "@/components/PageHero";
 import { CTABand } from "@/components/CTABand";
+import { TrackedAnchor } from "@/components/TrackedAnchor";
 import { FALL_RECRUITMENT, FAQS, SITE } from "@/lib/content";
 
 export const metadata: Metadata = {
@@ -66,9 +67,16 @@ export default function JoinUsPage() {
         blurb="We hire passionate students from every major. Apply if you love solving problems, designing creative solutions, and giving back to your community."
       >
         <div className="flex flex-wrap items-center gap-3">
-          <a href={SITE.applyForm} target="_blank" rel="noreferrer noopener" className="btn btn-gold">
+          <TrackedAnchor
+            href={SITE.applyForm}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="btn btn-gold"
+            event="apply_click"
+            eventProperties={{ page: "join-us" }}
+          >
             Apply Now
-          </a>
+          </TrackedAnchor>
           <p className="inline-flex items-center gap-2 rounded-full bg-white/8 border border-white/12 px-4 py-1.5 text-[12px] tracking-[0.18em] uppercase font-semibold text-[var(--gold)]">
             <span className="w-1.5 h-1.5 rounded-full bg-[var(--gold)] animate-pulse" aria-hidden />
             Applications due {FALL_RECRUITMENT.appsDue} at {FALL_RECRUITMENT.appsDueTime}
@@ -241,14 +249,16 @@ export default function JoinUsPage() {
           </>
         }
       >
-        <a
+        <TrackedAnchor
           href={SITE.applyForm}
           target="_blank"
           rel="noreferrer noopener"
           className="btn btn-gold"
+          event="apply_click"
+          eventProperties={{ page: "join-us" }}
         >
           Apply Now
-        </a>
+        </TrackedAnchor>
       </CTABand>
     </>
   );

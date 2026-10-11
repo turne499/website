@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Send, CheckCircle2 } from "lucide-react";
+import { track } from "@/lib/analytics";
 
 type State = "idle" | "submitting" | "success" | "error";
 
@@ -32,6 +33,7 @@ export function ContactForm() {
       if (!r.ok) throw new Error(`Submission failed (${r.status})`);
       setState("success");
       form.reset();
+      track("contact_submit");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       setState("error");
