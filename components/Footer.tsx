@@ -2,6 +2,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Link2, Mail } from "lucide-react";
 import { LinkedinIcon, InstagramIcon } from "./SocialIcons";
+import { TrackedAnchor } from "./TrackedAnchor";
 import { SITE, NAV_LINKS, PARTNER_LOGOS } from "@/lib/content";
 
 export function Footer() {
@@ -30,15 +31,17 @@ export function Footer() {
             >
               <LinkedinIcon width={18} height={18} />
             </a>
-            <a
+            <TrackedAnchor
               href={SITE.instagram}
               aria-label="Instagram"
               target="_blank"
               rel="noreferrer noopener"
               className="p-2.5 rounded-full bg-white/[0.06] hover:bg-[var(--gold)] hover:text-[var(--bg-dark)] transition-colors"
+              event="instagram_click"
+              eventProperties={{ page: "footer" }}
             >
               <InstagramIcon width={18} height={18} />
-            </a>
+            </TrackedAnchor>
             <a
               href={SITE.linktree}
               aria-label="Linktree"
@@ -68,6 +71,18 @@ export function Footer() {
                 </Link>
               </li>
             ))}
+            <li>
+              <TrackedAnchor
+                href={SITE.mailingListForm}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-[var(--fg-on-dark)]/70 hover:text-[var(--gold)]"
+                event="mailing_list_click"
+                eventProperties={{ page: "footer" }}
+              >
+                Mailing List
+              </TrackedAnchor>
+            </li>
           </ul>
         </div>
 

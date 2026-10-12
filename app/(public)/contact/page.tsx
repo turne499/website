@@ -3,6 +3,7 @@ import { Mail, Link2 } from "lucide-react";
 import { LinkedinIcon, InstagramIcon } from "@/components/SocialIcons";
 import { ContactForm } from "@/components/ContactForm";
 import { PageHero } from "@/components/PageHero";
+import { TrackedAnchor } from "@/components/TrackedAnchor";
 import { SITE } from "@/lib/content";
 
 export const metadata: Metadata = {
@@ -48,11 +49,13 @@ export default function ContactPage() {
                 <span className="font-medium text-[var(--bg-dark)]">CUBE Consulting</span>
               </span>
             </a>
-            <a
+            <TrackedAnchor
               href={SITE.instagram}
               target="_blank"
               rel="noreferrer noopener"
               className="flex items-start gap-4 rounded-2xl border border-[var(--border)] bg-white p-5 hover:border-[var(--gold)] transition-colors"
+              event="instagram_click"
+              eventProperties={{ page: "contact" }}
             >
               <span className="grid place-items-center w-11 h-11 rounded-xl bg-[var(--bg-cream)] text-[var(--bg-dark)] shrink-0">
                 <InstagramIcon width={18} height={18} />
@@ -61,7 +64,7 @@ export default function ContactPage() {
                 <span className="block text-xs tracking-[0.25em] uppercase text-[var(--muted)] font-semibold">Instagram</span>
                 <span className="font-medium text-[var(--bg-dark)]">@cubeconsulting_</span>
               </span>
-            </a>
+            </TrackedAnchor>
             <a
               href={SITE.linktree}
               target="_blank"
