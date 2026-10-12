@@ -41,6 +41,20 @@ describe("fetchUpcomingEvents cache", () => {
     expect(mockEventsList).toHaveBeenCalledTimes(2);
   });
 
+  it("caches the upcoming window, which starts from the current time", async () => {
+    // The route calls this with no window for ?window=upcoming.
+    const opts = { calendarId: "upcoming-test@example.invalid" };
+
+    await fetchUpcomingEvents(opts);
+    jest.advanceTimersByTime(1000);
+    await fetchUpcomingEvents(opts);
+    expect(mockEventsList).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(5 * 60 * 1000);
+    await fetchUpcomingEvents(opts);
+    expect(mockEventsList).toHaveBeenCalledTimes(2);
+  });
+
   it("does not cache errors", async () => {
     mockEventsList.mockRejectedValueOnce(new Error("Calendar not found"));
     const opts = {

@@ -82,7 +82,13 @@ function cachedEvents(key: string, load: () => Promise<CalendarResult>): Promise
   const now = Date.now();
   const cached = eventCache.get(key);
   if (cached && cached.expiresAt > now) return cached.promise;
-  if (cached) eventCache.delete(key);
+
+  // Sweep expired entries here rather than only on a repeat of the same key:
+  // a key that is never asked for again (last month's grid, an old upcoming
+  // window) would otherwise stay in memory for the life of the instance.
+  for (const [k, entry] of eventCache) {
+    if (entry.expiresAt <= now) eventCache.delete(k);
+  }
 
   const promise = load().then((result) => {
     if (!result.ok && eventCache.get(key)?.promise === promise) eventCache.delete(key);
@@ -121,7 +127,12 @@ export async function fetchUpcomingEvents(opts: FetchOptions = {}): Promise<Cale
   }
 
   const now = opts.now ?? new Date();
-  const timeMin = opts.from ?? now;
+  // "From now" is rounded down to the cache window. Left exact to the
+  // millisecond, every upcoming-list request would get its own cache key and
+  // the cache would never hit. Google matches events that END after timeMin, so
+  // the only cost is that an event which finished in the last five minutes
+  // may still be listed.
+  const timeMin = opts.from ?? new Date(Math.floor(now.getTime() / CACHE_TTL_MS) * CACHE_TTL_MS);
   const timeMax = opts.to ?? (() => {
     const horizon = new Date(timeMin);
     horizon.setDate(horizon.getDate() + (opts.days ?? 120));
