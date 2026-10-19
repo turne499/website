@@ -4,6 +4,8 @@
  * The POST /api/strikes route has two paths:
  *  - Exec-filed strike: immediately approved, emails sent if email_subject/email_body provided
  *  - Non-exec-filed strike: stays pending, no emails sent
+ *
+ * Either path can strike several members at once via `targets`.
  */
 
 import { NextRequest } from "next/server";
@@ -22,16 +24,22 @@ jest.mock("@/auth", () => ({
 
 let mockSupabaseData: Record<string, unknown[]> = {};
 const mockSupabaseInsertResult = { data: null as unknown, error: null as unknown };
+let mockInsertedRows: Record<string, unknown>[] = [];
 
 const buildSupabaseChain = (tableName: string) => {
   const chain = {
     _table: tableName,
     _filters: {} as Record<string, unknown>,
+    _inFilters: {} as Record<string, unknown[]>,
     select: jest.fn().mockReturnThis(),
     insert: jest.fn().mockReturnThis(),
     update: jest.fn().mockReturnThis(),
     eq: jest.fn().mockImplementation(function (this: typeof chain, col: string, val: unknown) {
       chain._filters[col] = val;
+      return chain;
+    }),
+    in: jest.fn().mockImplementation(function (this: typeof chain, col: string, vals: unknown[]) {
+      chain._inFilters[col] = vals;
       return chain;
     }),
     order: jest.fn().mockReturnThis(),
@@ -53,11 +61,25 @@ const buildSupabaseChain = (tableName: string) => {
     }),
     // Awaitable for multi-row queries (select without single)
     then: jest.fn().mockImplementation((resolve: (v: unknown) => unknown) => {
+      // Insert path: echo the inserted rows back, as .insert(rows).select() does
+      if (chain.insert.mock.calls.length > 0) {
+        const inserted = chain.insert.mock.calls[0][0];
+        mockInsertedRows.push(...(Array.isArray(inserted) ? inserted : [inserted]));
+        return Promise.resolve({
+          data: mockSupabaseInsertResult.error ? null : inserted,
+          error: mockSupabaseInsertResult.error,
+        }).then(resolve);
+      }
       const table = chain._table;
       const rows = mockSupabaseData[table] ?? [];
       const filters = chain._filters;
-      const matched = rows.filter((row) =>
-        Object.entries(filters).every(([k, v]) => (row as Record<string, unknown>)[k] === v)
+      const inFilters = chain._inFilters;
+      const matched = rows.filter(
+        (row) =>
+          Object.entries(filters).every(([k, v]) => (row as Record<string, unknown>)[k] === v) &&
+          Object.entries(inFilters).every(([k, vs]) =>
+            vs.includes((row as Record<string, unknown>)[k])
+          )
       );
       return Promise.resolve({ data: matched, error: null }).then(resolve);
     }),
@@ -119,6 +141,7 @@ describe("POST /api/strikes — email delivery on submission", () => {
     mockSupabaseData = {};
     mockSupabaseInsertResult.data = null;
     mockSupabaseInsertResult.error = null;
+    mockInsertedRows = [];
   });
 
   // ── Auth guards ─────────────────────────────────────────────────────────────
@@ -193,11 +216,10 @@ describe("POST /api/strikes — email delivery on submission", () => {
 
   // ── Exec-filed: 400 when email content omitted ──────────────────────────────
 
-  it("returns 400 (but still notifies HR) when exec omits email_subject/email_body", async () => {
+  it("returns 400 without inserting or emailing when exec omits email_subject/email_body", async () => {
     mockSession = execSession();
     mockSupabaseData["members"] = [TARGET_MEMBER];
     mockSupabaseData["strikes"] = [];
-    mockSupabaseInsertResult.data = { id: "strike-1", status: "approved" };
 
     const res = await POST(
       makeRequest({
@@ -209,11 +231,8 @@ describe("POST /api/strikes — email delivery on submission", () => {
     );
 
     expect(res.status).toBe(400);
-    // The strike row is already inserted at this point, so HR still gets notified.
-    expect(mockSendEmail).toHaveBeenCalledTimes(1);
-    expect(mockSendEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ to: "hr@cubeconsulting.org" })
-    );
+    expect(mockInsertedRows).toHaveLength(0);
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 
   // ── Non-exec-filed: pending, only HR is notified ────────────────────────────
@@ -374,5 +393,159 @@ describe("POST /api/strikes — email delivery on submission", () => {
 
     expect(res.status).toBe(404);
     expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+  // ── Multiple members in one filing ──────────────────────────────────────────
+
+  describe("striking multiple members", () => {
+    const SECOND_MEMBER = { id: "second-member-id", full_name: "John Roe", email: "john@example.com" };
+
+    function bulkBody(overrides: Record<string, unknown> = {}) {
+      return {
+        strike_type: "half",
+        reason: "Missed general meeting",
+        targets: [
+          { member_id: TARGET_MEMBER.id, email_subject: "Notice for Jane", email_body: "<p>Jane</p>" },
+          { member_id: SECOND_MEMBER.id, email_subject: "Notice for John", email_body: "<p>John</p>" },
+        ],
+        ...overrides,
+      };
+    }
+
+    it("inserts one approved strike per member and emails each their own notice", async () => {
+      mockSession = execSession();
+      mockSupabaseData["members"] = [TARGET_MEMBER, SECOND_MEMBER];
+      mockSupabaseData["strikes"] = [];
+
+      const res = await POST(makeRequest(bulkBody()));
+
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      expect(data.strikes).toHaveLength(2);
+      expect(mockInsertedRows).toEqual([
+        expect.objectContaining({ member_id: TARGET_MEMBER.id, strike_type: "half", status: "approved" }),
+        expect.objectContaining({ member_id: SECOND_MEMBER.id, strike_type: "half", status: "approved" }),
+      ]);
+
+      // One HR notice for the whole filing, then one email per member.
+      expect(mockSendEmail).toHaveBeenCalledTimes(3);
+      expect(mockSendEmail).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          to: "hr@cubeconsulting.org",
+          html: expect.stringContaining("Jane Doe and John Roe"),
+        })
+      );
+      expect(mockSendEmail).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ to: TARGET_MEMBER.email, subject: "Notice for Jane" })
+      );
+      expect(mockSendEmail).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ to: SECOND_MEMBER.email, subject: "Notice for John" })
+      );
+    });
+
+    it("sends the 3-strike alert only for members who reach the threshold", async () => {
+      mockSession = execSession();
+      mockSupabaseData["members"] = [
+        TARGET_MEMBER,
+        SECOND_MEMBER,
+        { id: "exec-0", full_name: "Exec 0", email: EXEC_MEMBERS[0].email, role: "exec" },
+      ];
+      mockSupabaseData["strikes"] = [
+        { member_id: TARGET_MEMBER.id, effective_type: "full", status: "approved" },
+        { member_id: TARGET_MEMBER.id, effective_type: "full", status: "approved" },
+        { member_id: TARGET_MEMBER.id, effective_type: "full", status: "approved" },
+        { member_id: SECOND_MEMBER.id, effective_type: "half", status: "approved" },
+      ];
+
+      await POST(makeRequest(bulkBody()));
+
+      const alerts = mockSendEmail.mock.calls.filter(([opts]) =>
+        String((opts as { subject: string }).subject).includes("3-Strike")
+      );
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0][0]).toEqual(
+        expect.objectContaining({ subject: expect.stringContaining(TARGET_MEMBER.full_name) })
+      );
+    });
+
+    it("files pending requests for every member when a project manager submits", async () => {
+      mockSession = execSession({ role: "project_manager" });
+      mockSupabaseData["members"] = [TARGET_MEMBER, SECOND_MEMBER];
+
+      const res = await POST(
+        makeRequest({
+          strike_type: "full",
+          reason: "Missed client call",
+          targets: [{ member_id: TARGET_MEMBER.id }, { member_id: SECOND_MEMBER.id }],
+        })
+      );
+
+      expect(res.status).toBe(201);
+      expect(mockInsertedRows).toHaveLength(2);
+      expect(mockInsertedRows.every((r) => r.status === "pending")).toBe(true);
+      expect(mockSendEmail).toHaveBeenCalledTimes(1);
+      expect(mockSendEmail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: "hr@cubeconsulting.org" })
+      );
+    });
+
+    it("inserts nothing when any exec email is missing", async () => {
+      mockSession = execSession();
+      mockSupabaseData["members"] = [TARGET_MEMBER, SECOND_MEMBER];
+
+      const res = await POST(
+        makeRequest(
+          bulkBody({
+            targets: [
+              { member_id: TARGET_MEMBER.id, email_subject: "Notice", email_body: "<p>Jane</p>" },
+              { member_id: SECOND_MEMBER.id, email_subject: "Notice", email_body: "  " },
+            ],
+          })
+        )
+      );
+
+      expect(res.status).toBe(400);
+      expect(mockInsertedRows).toHaveLength(0);
+      expect(mockSendEmail).not.toHaveBeenCalled();
+    });
+
+    it("inserts nothing when any member does not exist", async () => {
+      mockSession = execSession();
+      mockSupabaseData["members"] = [TARGET_MEMBER];
+
+      const res = await POST(makeRequest(bulkBody()));
+
+      expect(res.status).toBe(404);
+      expect(mockInsertedRows).toHaveLength(0);
+      expect(mockSendEmail).not.toHaveBeenCalled();
+    });
+
+    it("rejects the same member listed twice", async () => {
+      mockSession = execSession();
+      mockSupabaseData["members"] = [TARGET_MEMBER];
+
+      const res = await POST(
+        makeRequest(
+          bulkBody({
+            targets: [
+              { member_id: TARGET_MEMBER.id, email_subject: "a", email_body: "<p>a</p>" },
+              { member_id: TARGET_MEMBER.id, email_subject: "b", email_body: "<p>b</p>" },
+            ],
+          })
+        )
+      );
+
+      expect(res.status).toBe(400);
+      expect(mockInsertedRows).toHaveLength(0);
+    });
+
+    it("rejects an empty targets list", async () => {
+      mockSession = execSession();
+      const res = await POST(makeRequest(bulkBody({ targets: [] })));
+      expect(res.status).toBe(400);
+      expect(mockSendEmail).not.toHaveBeenCalled();
+    });
   });
 });

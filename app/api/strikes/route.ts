@@ -92,6 +92,15 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ received: data ?? [] });
 }
 
+const MAX_TARGETS = 50;
+
+type TargetInput = { member_id?: unknown; email_subject?: unknown; email_body?: unknown };
+
+function listNames(names: string[]): string {
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.memberId) {
@@ -105,57 +114,113 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { target_member_id, strike_type, reason, email_subject, email_body } = body;
+  const { strike_type, reason } = body;
 
-  if (!target_member_id || !strike_type || !reason) {
+  // Several members can be struck in one filing via `targets`, each with their
+  // own email. A single strike may still be sent as target_member_id + email fields.
+  const targets: TargetInput[] = Array.isArray(body.targets)
+    ? body.targets
+    : body.target_member_id
+    ? [
+        {
+          member_id: body.target_member_id,
+          email_subject: body.email_subject,
+          email_body: body.email_body,
+        },
+      ]
+    : [];
+
+  if (targets.length === 0 || !strike_type || !reason) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
   if (!["half", "full"].includes(strike_type)) {
     return NextResponse.json({ error: "Invalid strike_type" }, { status: 400 });
   }
+  if (targets.length > MAX_TARGETS) {
+    return NextResponse.json(
+      { error: `At most ${MAX_TARGETS} members can be struck at once` },
+      { status: 400 }
+    );
+  }
 
-  const supabase = createServerClient();
-
-  // Fetch target member info
-  const { data: targetMember } = await supabase
-    .from("members")
-    .select("id, full_name, email")
-    .eq("id", target_member_id)
-    .single();
-
-  if (!targetMember) {
-    return NextResponse.json({ error: "Target member not found" }, { status: 404 });
+  const targetIds = targets.map((t) => t?.member_id);
+  if (targetIds.some((id) => typeof id !== "string" || !id)) {
+    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  }
+  if (new Set(targetIds).size !== targetIds.length) {
+    return NextResponse.json(
+      { error: "A member can only be struck once per filing" },
+      { status: 400 }
+    );
   }
 
   const isExec = role === "exec";
+
+  // Exec strikes are approved on insert, so every member's email must be present
+  // before anything is written.
+  if (
+    isExec &&
+    targets.some(
+      (t) =>
+        typeof t.email_subject !== "string" ||
+        !t.email_subject.trim() ||
+        typeof t.email_body !== "string" ||
+        !t.email_body.trim()
+    )
+  ) {
+    return NextResponse.json({ error: "Missing email content" }, { status: 400 });
+  }
+
+  const supabase = createServerClient();
+
+  const { data: foundMembers } = await supabase
+    .from("members")
+    .select("id, full_name, email")
+    .in("id", targetIds as string[]);
+
+  const membersById = new Map((foundMembers ?? []).map((m) => [m.id as string, m]));
+  if (targetIds.some((id) => !membersById.has(id as string))) {
+    return NextResponse.json({ error: "Target member not found" }, { status: 404 });
+  }
+
   const now = new Date().toISOString();
+  const status = isExec ? "approved" : "pending";
 
-  const insertData = {
-    member_id: target_member_id,
-    filed_by: memberId,
-    strike_type,
-    effective_type: isExec ? strike_type : null,
-    reason,
-    status: isExec ? "approved" : "pending",
-    resolved_at: isExec ? now : null,
-    resolved_by: isExec ? memberId : null,
-  };
-
-  const { data: strike, error } = await supabase
+  // One insert, so a multi-member filing lands all-or-nothing.
+  const { data: strikes, error } = await supabase
     .from("strikes")
-    .insert(insertData)
-    .select()
-    .single();
+    .insert(
+      targets.map((t) => ({
+        member_id: t.member_id as string,
+        filed_by: memberId,
+        strike_type,
+        effective_type: isExec ? strike_type : null,
+        reason,
+        status,
+        resolved_at: isExec ? now : null,
+        resolved_by: isExec ? memberId : null,
+      }))
+    )
+    .select();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Best-effort HR notice for every filing. Email failure never fails the strike.
+  const targetNames = targets.map((t) => membersById.get(t.member_id as string)!.full_name);
+
+  // Best-effort HR notice, one per filing. Email failure never fails the strike.
   try {
-    const hrNotice = hrNoticeTemplate(
-      "filed",
-      targetMember.full_name,
-      `A ${strike_type} strike was filed by ${filerName} (${filerEmail}). Reason: ${reason}. Status: ${insertData.status}.`
-    );
+    const hrNotice =
+      targets.length === 1
+        ? hrNoticeTemplate(
+            "filed",
+            targetNames[0],
+            `A ${strike_type} strike was filed by ${filerName} (${filerEmail}). Reason: ${reason}. Status: ${status}.`
+          )
+        : hrNoticeTemplate(
+            "filed",
+            `${targets.length} members`,
+            `A ${strike_type} strike was filed against each of ${listNames(targetNames)} by ${filerName} (${filerEmail}). Reason: ${reason}. Status: ${status}.`
+          );
     await sendEmail({
       to: HR_EMAIL,
       subject: hrNotice.subject,
@@ -165,46 +230,58 @@ export async function POST(req: NextRequest) {
     console.error("Strike filing HR notice failed (non-fatal):", e);
   }
 
-  if (isExec && (!email_subject || !email_body)) {
-    return NextResponse.json({ error: "Missing email content" }, { status: 400 });
-  }
-
   // Send emails for exec-filed (immediately approved) strikes
-  if (isExec && email_subject && email_body) {
+  if (isExec) {
+    let totals = new Map<string, number>();
+    let execEmails: string[] | null = null;
     try {
       const { data: allStrikes } = await supabase
         .from("strikes")
-        .select("effective_type, status")
-        .eq("member_id", target_member_id);
-
-      const newTotal = computeStrikeTotal(allStrikes ?? []);
-
-      await sendEmail({
-        to: targetMember.email,
-        subject: email_subject,
-        html: wrapInShell(email_subject, email_body),
-      });
-
-      // 3-strike exec alert
-      if (newTotal >= 3) {
-        const { data: execMembers } = await supabase
-          .from("members")
-          .select("email")
-          .eq("role", "exec");
-
-        if (execMembers && execMembers.length > 0) {
-          const alert = execAlertTemplate(targetMember.full_name);
-          await sendEmail({
-            to: execMembers.map((m) => m.email),
-            subject: alert.subject,
-            html: wrapInShell(alert.subject, alert.innerHtml),
-          });
-        }
-      }
+        .select("member_id, effective_type, status")
+        .in("member_id", targetIds as string[]);
+      totals = new Map(
+        targetIds.map((id) => [
+          id as string,
+          computeStrikeTotal((allStrikes ?? []).filter((s) => s.member_id === id)),
+        ])
+      );
     } catch (e) {
-      console.error("Strike notification email failed (non-fatal):", e);
+      console.error("Strike total lookup failed (non-fatal):", e);
+    }
+
+    // Each member is notified separately so one bad address doesn't stop the rest.
+    for (const t of targets) {
+      const target = membersById.get(t.member_id as string)!;
+      try {
+        await sendEmail({
+          to: target.email,
+          subject: t.email_subject as string,
+          html: wrapInShell(t.email_subject as string, t.email_body as string),
+        });
+
+        // 3-strike exec alert
+        if ((totals.get(target.id) ?? 0) >= 3) {
+          if (execEmails === null) {
+            const { data: execMembers } = await supabase
+              .from("members")
+              .select("email")
+              .eq("role", "exec");
+            execEmails = (execMembers ?? []).map((m) => m.email);
+          }
+          if (execEmails.length > 0) {
+            const alert = execAlertTemplate(target.full_name);
+            await sendEmail({
+              to: execEmails,
+              subject: alert.subject,
+              html: wrapInShell(alert.subject, alert.innerHtml),
+            });
+          }
+        }
+      } catch (e) {
+        console.error(`Strike notification email to ${target.id} failed (non-fatal):`, e);
+      }
     }
   }
 
-  return NextResponse.json({ strike }, { status: 201 });
+  return NextResponse.json({ strikes: strikes ?? [] }, { status: 201 });
 }

@@ -32,8 +32,8 @@ export default async function NewStrikePage() {
         </h1>
         <p className="mt-3 text-[var(--muted)]">
           {isExec
-            ? "Strike will be approved immediately and the member will be notified by email."
-            : "Your request will be reviewed by the executive board before taking effect."}
+            ? "Strikes are approved immediately and each member is notified by email. Add several members to strike them for the same reason."
+            : "Requests are reviewed by the executive board before taking effect. Add several members to file the same request for each."}
         </p>
       </div>
 

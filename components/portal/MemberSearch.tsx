@@ -8,9 +8,20 @@ export type MemberOption = { id: string; name: string; email: string };
 type Props = {
   onSelect: (member: MemberOption) => void;
   disabled?: boolean;
+  /** Reset the input after each pick, for adding several members one at a time. */
+  clearOnSelect?: boolean;
+  /** Members to leave out of the results, e.g. ones already picked. */
+  excludeIds?: string[];
+  placeholder?: string;
 };
 
-export function MemberSearch({ onSelect, disabled }: Props) {
+export function MemberSearch({
+  onSelect,
+  disabled,
+  clearOnSelect,
+  excludeIds,
+  placeholder = "Search member name…",
+}: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemberOption[]>([]);
   const [open, setOpen] = useState(false);
@@ -49,6 +60,11 @@ export function MemberSearch({ onSelect, disabled }: Props) {
   }, [query, selected]);
 
   function handleSelect(member: MemberOption) {
+    if (clearOnSelect) {
+      handleClear();
+      onSelect(member);
+      return;
+    }
     setSelected(member);
     setQuery(member.name);
     setResults([]);
@@ -63,6 +79,10 @@ export function MemberSearch({ onSelect, disabled }: Props) {
     setOpen(false);
   }
 
+  const visibleResults = excludeIds?.length
+    ? results.filter((m) => !excludeIds.includes(m.id))
+    : results;
+
   return (
     <div ref={containerRef} className="relative w-full">
       <div className="relative">
@@ -72,7 +92,7 @@ export function MemberSearch({ onSelect, disabled }: Props) {
         />
         <input
           type="text"
-          placeholder="Search member name…"
+          placeholder={placeholder}
           value={query}
           onChange={(e) => {
             if (selected) handleClear();
@@ -94,9 +114,9 @@ export function MemberSearch({ onSelect, disabled }: Props) {
         )}
       </div>
 
-      {open && results.length > 0 && (
+      {open && visibleResults.length > 0 && (
         <ul className="absolute z-50 mt-1 w-full bg-white border border-[var(--border)] rounded-xl shadow-lg overflow-hidden">
-          {results.map((m) => (
+          {visibleResults.map((m) => (
             <li key={m.id}>
               <button
                 type="button"
@@ -111,7 +131,7 @@ export function MemberSearch({ onSelect, disabled }: Props) {
         </ul>
       )}
 
-      {open && results.length === 0 && query.trim() && !selected && (
+      {open && visibleResults.length === 0 && query.trim() && !selected && (
         <div className="absolute z-50 mt-1 w-full bg-white border border-[var(--border)] rounded-xl shadow-lg px-4 py-3 text-sm text-[var(--muted)]">
           No members found.
         </div>
